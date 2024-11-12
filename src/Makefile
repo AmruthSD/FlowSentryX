@@ -17,6 +17,10 @@ $(TARGETS): % : %_kern.o
 		-w \
 		-O2 -o $@ -c $<
 
+yaml_reader :
+	clang -o yaml_reader yaml_reader.c -lbpf
+
+
 clean:
 	- rm *.o 
 	- rm -f /sys/fs/bpf/$(TARGETS)

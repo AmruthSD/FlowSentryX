@@ -343,6 +343,7 @@ int fsx(struct xdp_md *ctx)
         bpf_printk("No of packets allowed %llu\n", stats->allowed);
     }
 
+    
     return XDP_PASS;
 }
 
