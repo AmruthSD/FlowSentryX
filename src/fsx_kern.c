@@ -93,6 +93,28 @@ struct
     __type(value, __u64);
 } ipv6_blacklist_map SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 2);      
+    __type(key, __u32);            
+    __type(value, __u64);          
+} tcp_syn_size_oldtime SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1000);      
+    __type(key, struct tcp_syn_packet_id_key);            
+    __type(value, __u64);          
+} tcp_syn_lru_hash_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, SIZEOFPORTS);      
+    __type(key, __u32);            
+    __type(value, struct tcp_rst_port_node);          
+} tcp_rst_port SEC(".maps");
+
+
 SEC("xdp")
 int fsx(struct xdp_md *ctx)
 {
@@ -343,7 +365,7 @@ int fsx(struct xdp_md *ctx)
         bpf_printk("No of packets allowed %llu\n", stats->allowed);
     }
 
-    
+
     return XDP_PASS;
 }
 
