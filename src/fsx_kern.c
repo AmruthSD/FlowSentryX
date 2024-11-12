@@ -18,6 +18,10 @@ in the fsx_struct.h map */
 #define THRESHOLD_RST 10
 #define LIMIT_SYN 10
 #define EXTRA_TIME_SYN 1000000000
+#define ICMP_MAX_PACKET_SIZE 1000  // not sure about a good limit, can modify it later
+#define UDP_MAX_PACKET_RATE 100
+#define INTERVAL_NS 1000000000 // 1 second 
+
 
 #ifndef memcpy
 #define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
@@ -120,7 +124,19 @@ struct {
     __type(value, struct tcp_rst_port_node);          
 } tcp_rst_port SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u16);
+    __type(value, struct udp_port_stat);
+    __uint(max_entries, 65536);
+} udp_port_counters_map SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct icmp_rate_limit_data);
+} icmp_rate_limit_map SEC(".maps");
 
 SEC("xdp")
 int fsx(struct xdp_md *ctx)
@@ -373,9 +389,12 @@ int fsx(struct xdp_md *ctx)
     }
 
     struct tcphdr *tcp=NULL;
+    struct udphdr *udp = NULL;
+    struct icmphdr *icmp = NULL;
+
     __u32 zero = 0,one = 1;
     struct tcp_syn_packet_id_key packet_key;
-    __u32 application_layer_type = 0; //1 for tcp
+    __u32 application_layer_type = 0; //1 for tcp, 2 for udp, 3 for icmp
     if(ip4hdr){
         packet_key.ip_type = 1;
         packet_key.ipadd.ipv4 = ip4hdr->saddr;
@@ -383,6 +402,20 @@ int fsx(struct xdp_md *ctx)
             tcp = (void *)((unsigned char *)ip4hdr + (ip4hdr->ihl * 4));
             application_layer_type = 1;
             if ((void *)(tcp + 1) > data_end){
+                return XDP_PASS;
+            }
+        }
+        else if(ip4hdr->protocol == IPPROTO_UDP){
+            udp = (void*)(unsigned char *)ip4hdr + (ip4hdr->ihl * 4);
+            application_layer_type = 2;
+            if ((void *)(udp + 1) > data_end) {
+                return XDP_PASS;
+            }
+        }
+        else if(ip4hdr->protocol == IPPROTO_ICMP) {
+            icmp = (void *)((unsigned char *)ip4hdr + (ip4hdr->ihl * 4));
+            application_layer_type = 3;
+            if ((void *)(icmp + 1) > data_end) {
                 return XDP_PASS;
             }
         }
@@ -397,6 +430,14 @@ int fsx(struct xdp_md *ctx)
                 return XDP_PASS;
             }
         }
+        else if(ip6hdr->nexthdr == IPPROTO_UDP){
+            udp = (void *)((unsigned char *)ip6hdr + 1);
+            application_layer_type = 2;
+            if ((void *)(udp + 1) > data_end){
+                return XDP_PASS;
+            }
+        }
+        // icmpv6 here
     }
 
     if(application_layer_type==1 && tcp!=NULL){
@@ -501,7 +542,66 @@ int fsx(struct xdp_md *ctx)
         }
         return XDP_PASS;
     }
+    if(application_layer_type == 2 && udp){
+        __u16 dest_port = 0;
+        dest_port = bpf_ntohs(udp->dest);
+         struct udp_port_stat *stat = bpf_map_lookup_elem(&udp_port_counters_map, &dest_port);
+        __u64 now = bpf_ktime_get_ns();
 
+        if (stat) {
+            if (now - stat->last_check < TIME_WINDOW) {
+                stat->packet_count += 1;
+
+                // If packet count exceeds threshold, drop packet
+                if (stat->packet_count > THRESHOLD_PACKETS) {
+                    bpf_trace_printk("Dropping UDP packet to port %d due to flood\n", dest_port);
+                    return XDP_DROP;
+                }
+            } else {
+                stat->packet_count = 1;
+                stat->last_check = now;
+            }
+            bpf_map_update_elem(&udp_port_counters_map, &dest_port, stat, BPF_ANY);
+        } else {
+            struct udp_port_stat new_stat = {};
+            new_stat.packet_count = 1;
+            new_stat.last_check = now;
+            bpf_map_update_elem(&udp_port_counters_map, &dest_port, &new_stat, BPF_ANY);
+        }
+    }
+    if(application_layer_type == 3 && icmp){
+        if (icmp->type == 8) { // 8 == icmp echo request packets
+            int packet_size = data_end - data;
+
+            if (packet_size > ICMP_MAX_PACKET_SIZE) {
+                return XDP_DROP;
+            }
+            __u32 key = 0;
+            struct icmp_rate_limit_data *rate_data = bpf_map_lookup_elem(&icmp_rate_limit_map, &key);
+            __u64 now = bpf_ktime_get_ns();
+
+            if (rate_data) {
+                __u64 elapsed = now - rate_data->last_reset_time;
+
+                if (elapsed >= INTERVAL_NS) { // if too much time has passed since the first packet arrival time.
+                    rate_data->packet_count = 1;
+                    rate_data->last_reset_time = now;
+                } else {
+                    if (rate_data->packet_count >= UDP_MAX_PACKET_RATE) {
+                        return XDP_DROP;
+                    }
+                    rate_data->packet_count++;
+                }
+                bpf_map_update_elem(&icmp_rate_limit_map, &key, rate_data, BPF_ANY);
+            } else {
+                struct icmp_rate_limit_data new_data = {
+                    .last_reset_time = now,
+                    .packet_count = 1
+                };
+                bpf_map_update_elem(&icmp_rate_limit_map, &key, &new_data, BPF_ANY);
+            }
+        }
+    }
     return XDP_PASS;
 }
 

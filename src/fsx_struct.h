@@ -47,4 +47,14 @@ struct Semp{
     struct bpf_spin_lock semaphore;
 };
 
+struct icmp_rate_limit_data {
+    __u64 last_reset_time; 
+    __u32 packet_count;     
+}; 
+
+struct udp_port_stat {
+    __u32 packet_count;
+    __u64 last_check;
+};
+
 #endif
