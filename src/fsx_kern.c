@@ -544,20 +544,20 @@ int fsx(struct xdp_md *ctx)
         return XDP_PASS;
     }
     if(application_layer_type == 2 && udp){
-        /*__u16 dest_port = 0;
+        __u16 dest_port = 0;
         dest_port = bpf_ntohs(udp->dest);
-         struct udp_port_stat *stat = bpf_map_lookup_elem(&udp_port_counters_map, &dest_port);
+        struct udp_port_stat *stat = bpf_map_lookup_elem(&udp_port_counters_map, &dest_port);
         __u64 now = bpf_ktime_get_ns();
 
         if (stat) {
-            if (now - stat->last_check < UDP_TIME_WINDOW) {
+            if (now - (stat->last_check) < UDP_TIME_WINDOW) {
                 stat->packet_count += 1;
 
                 // If packet count exceeds threshold, drop packet
                 if (stat->packet_count > UDP_THRESHOLD_PACKETS) {
-                    bpf_trace_printk("Dropping UDP packet to port %d due to flood\n", dest_port);
+                    bpf_printk("Dropping UDP packet to port %d due to flood\n", dest_port);
                     return XDP_DROP;
-                }
+                } 
             } else {
                 stat->packet_count = 1;
                 stat->last_check = now;
@@ -568,7 +568,7 @@ int fsx(struct xdp_md *ctx)
             new_stat.packet_count = 1;
             new_stat.last_check = now;
             bpf_map_update_elem(&udp_port_counters_map, &dest_port, &new_stat, BPF_ANY);
-        }*/
+        }
     }
     if(application_layer_type == 3 && icmp){
         if (icmp->type == 8) { // 8 == icmp echo request packets
