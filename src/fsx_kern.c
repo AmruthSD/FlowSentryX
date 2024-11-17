@@ -544,7 +544,7 @@ int fsx(struct xdp_md *ctx)
         return XDP_PASS;
     }
     if(application_layer_type == 2 && udp){
-        __u16 dest_port = 0;
+        /*__u16 dest_port = 0;
         dest_port = bpf_ntohs(udp->dest);
          struct udp_port_stat *stat = bpf_map_lookup_elem(&udp_port_counters_map, &dest_port);
         __u64 now = bpf_ktime_get_ns();
@@ -568,7 +568,7 @@ int fsx(struct xdp_md *ctx)
             new_stat.packet_count = 1;
             new_stat.last_check = now;
             bpf_map_update_elem(&udp_port_counters_map, &dest_port, &new_stat, BPF_ANY);
-        }
+        }*/
     }
     if(application_layer_type == 3 && icmp){
         if (icmp->type == 8) { // 8 == icmp echo request packets
