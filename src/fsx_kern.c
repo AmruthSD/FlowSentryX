@@ -20,8 +20,9 @@ in the fsx_struct.h map */
 #define EXTRA_TIME_SYN 1000000000
 #define ICMP_MAX_PACKET_SIZE 1000  // not sure about a good limit, can modify it later
 #define UDP_MAX_PACKET_RATE 100
-#define INTERVAL_NS 1000000000 // 1 second 
-
+#define ICMP_INTERVAL_NS 1000000000 // 1 second 
+#define UDP_THRESHOLD_PACKETS 100    // Maximum packets per interval for a single port
+#define UDP_TIME_WINDOW 1000000000   // 1 second
 
 #ifndef memcpy
 #define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
@@ -549,11 +550,11 @@ int fsx(struct xdp_md *ctx)
         __u64 now = bpf_ktime_get_ns();
 
         if (stat) {
-            if (now - stat->last_check < TIME_WINDOW) {
+            if (now - stat->last_check < UDP_TIME_WINDOW) {
                 stat->packet_count += 1;
 
                 // If packet count exceeds threshold, drop packet
-                if (stat->packet_count > THRESHOLD_PACKETS) {
+                if (stat->packet_count > UDP_THRESHOLD_PACKETS) {
                     bpf_trace_printk("Dropping UDP packet to port %d due to flood\n", dest_port);
                     return XDP_DROP;
                 }
@@ -583,7 +584,7 @@ int fsx(struct xdp_md *ctx)
             if (rate_data) {
                 __u64 elapsed = now - rate_data->last_reset_time;
 
-                if (elapsed >= INTERVAL_NS) { // if too much time has passed since the first packet arrival time.
+                if (elapsed >= ICMP_INTERVAL_NS) { // if too much time has passed since the first packet arrival time.
                     rate_data->packet_count = 1;
                     rate_data->last_reset_time = now;
                 } else {
