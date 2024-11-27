@@ -21,5 +21,31 @@ struct ip_stats
     __u64 track_time;   // time at which the packet arrived
 };
 
+struct tcp_rst_port_node{
+    __u64 port_time;
+    __u32 rst_cnt;
+    struct bpf_spin_lock semaphore;
+};
+
+struct tcp_syn__u128 {
+    __u64 hi; // Higher 64 bits for IPv6
+    __u64 lo; // Lower 64 bits for IPv6
+};
+
+union tcp_syn_ip_address {
+    __u32 ipv4;           // 32-bit IPv4 address
+    struct tcp_syn__u128 ipv6;   // 128-bit IPv6 address
+};
+
+struct tcp_syn_packet_id_key{
+    union tcp_syn_ip_address ipadd; // IPv4 or IPv6
+    __u16 dest;
+    __u16 source;
+    __u8 ip_type;
+};
+struct Semp{
+    struct bpf_spin_lock semaphore;
+};
+
 
 #endif
