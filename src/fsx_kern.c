@@ -19,6 +19,11 @@ in the fsx_struct.h map */
 #define THRESHOLD_RST 100           //limit on number of packets to be configurable later
 #define LIMIT_SYN 100               //limit on number of packets to be configurable later
 #define EXTRA_TIME_SYN 1000000000   //1 sec
+#define ICMP_MAX_PACKET_SIZE 1000  // not sure about a good limit, can modify it later
+#define UDP_MAX_PACKET_RATE 100
+#define ICMP_INTERVAL_NS 1000000000 // 1 second 
+#define UDP_THRESHOLD_PACKETS 100    // Maximum packets per interval for a single port
+#define UDP_TIME_WINDOW 1000000000   // 1 second
 
 #ifndef memcpy
 #define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
@@ -120,6 +125,20 @@ struct {
     __type(key, __u32);            
     __type(value, struct tcp_rst_port_node);          
 } tcp_rst_port SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u16);
+    __type(value, struct udp_port_stat);
+    __uint(max_entries, 65536);
+} udp_port_counters_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct icmp_rate_limit_data);
+} icmp_rate_limit_map SEC(".maps");
 
 SEC("xdp")
 int fsx(struct xdp_md *ctx)
