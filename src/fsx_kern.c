@@ -13,6 +13,18 @@ in the fsx_struct.h map */
 #include "fsx_struct.h"
 #include "parsing_helper.h"
 
+
+#define SIZEOFPORTS_RST 65536       //number of ports
+#define TIMEOUT_RST  1000000000     //1 sec
+#define THRESHOLD_RST 100           //limit on number of packets to be configurable later
+#define LIMIT_SYN 100               //limit on number of packets to be configurable later
+#define EXTRA_TIME_SYN 1000000000   //1 sec
+#define ICMP_MAX_PACKET_SIZE 1000  // not sure about a good limit, can modify it later
+#define UDP_MAX_PACKET_RATE 100
+#define ICMP_INTERVAL_NS 1000000000 // 1 second 
+#define UDP_THRESHOLD_PACKETS 100    // Maximum packets per interval for a single port
+#define UDP_TIME_WINDOW 1000000000   // 1 second
+
 #ifndef memcpy
 #define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
 #endif
@@ -92,6 +104,41 @@ struct
     __type(key, __u128);
     __type(value, __u64);
 } ipv6_blacklist_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 2);      
+    __type(key, __u32);            
+    __type(value, __u64);          
+} tcp_syn_size_oldtime SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1000);      
+    __type(key, struct tcp_syn_packet_id_key);            
+    __type(value, __u64);          
+} tcp_syn_lru_hash_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, SIZEOFPORTS_RST);      
+    __type(key, __u32);            
+    __type(value, struct tcp_rst_port_node);          
+} tcp_rst_port SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u16);
+    __type(value, struct udp_port_stat);
+    __uint(max_entries, 65536);
+} udp_port_counters_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct icmp_rate_limit_data);
+} icmp_rate_limit_map SEC(".maps");
 
 SEC("xdp")
 int fsx(struct xdp_md *ctx)
@@ -343,6 +390,221 @@ int fsx(struct xdp_md *ctx)
         bpf_printk("No of packets allowed %llu\n", stats->allowed);
     }
 
+    struct tcphdr *tcp=NULL;
+    struct udphdr *udp = NULL;
+    struct icmphdr *icmp = NULL;
+
+    __u32 zero = 0,one = 1;
+    struct tcp_syn_packet_id_key packet_key;
+    __u32 application_layer_type = 0; //1 for tcp, 2 for udp, 3 for icmp
+    if(ip4hdr){
+        packet_key.ip_type = 1;
+        packet_key.ipadd.ipv4 = ip4hdr->saddr;
+        if (ip4hdr->protocol == IPPROTO_TCP) {
+            tcp = (void *)((unsigned char *)ip4hdr + (ip4hdr->ihl * 4));
+            application_layer_type = 1;
+            if ((void *)(tcp + 1) > data_end){
+                return XDP_PASS;
+            }
+        }
+        else if(ip4hdr->protocol == IPPROTO_UDP){
+            udp = (void*)(unsigned char *)ip4hdr + (ip4hdr->ihl * 4);
+            application_layer_type = 2;
+            if ((void *)(udp + 1) > data_end) {
+                return XDP_PASS;
+            }
+        }
+        else if(ip4hdr->protocol == IPPROTO_ICMP) {
+            icmp = (void *)((unsigned char *)ip4hdr + (ip4hdr->ihl * 4));
+            application_layer_type = 3;
+            if ((void *)(icmp + 1) > data_end) {
+                return XDP_PASS;
+            }
+        }
+    }
+    else if(ip6hdr){
+        packet_key.ip_type = 2;
+        __builtin_memcpy(&packet_key.ipadd.ipv6, &ip6hdr->saddr, sizeof(struct in6_addr));
+        if (ip6hdr->nexthdr == IPPROTO_TCP){
+            tcp = (void *)((unsigned char *)ip6hdr + 1);
+            application_layer_type = 1;
+            if ((void *)(tcp + 1) > data_end){
+                return XDP_PASS;
+            }
+        }
+        else if(ip6hdr->nexthdr == IPPROTO_UDP){
+            udp = (void *)((unsigned char *)ip6hdr + 1);
+            application_layer_type = 2;
+            if ((void *)(udp + 1) > data_end){
+                return XDP_PASS;
+            }
+        }
+        // icmpv6 here
+    }
+
+    if(application_layer_type==1 && tcp!=NULL){
+        return XDP_PASS;
+    }
+    else if(application_layer_type==1 && tcp){
+        packet_key.dest = tcp->dest;
+        packet_key.source = tcp->source;
+        __u64 *size_allowed,*old_time;
+        __u32 dest = tcp->dest; 
+        size_allowed = bpf_map_lookup_elem(&tcp_syn_size_oldtime,&zero);
+        old_time = bpf_map_lookup_elem(&tcp_syn_size_oldtime,&one);
+        if(!size_allowed || !old_time){
+            return XDP_PASS;
+        }
+        if(!(tcp->fin  ||
+            tcp->psh || 
+            tcp->urg || 
+            tcp->ece || 
+            tcp->cwr || 
+            tcp->rst )){
+            if (tcp->syn && !tcp->ack) {
+                __u64 curr_time = bpf_ktime_get_ns();
+                //check if time is greater than old time + extra
+                if(*old_time + EXTRA_TIME_SYN < curr_time){
+                    // if yes update old time and make size as 1
+                    *size_allowed = 1;
+                    *old_time = curr_time;
+                    bpf_map_update_elem(&tcp_syn_lru_hash_map,&packet_key,&curr_time,BPF_ANY);
+                    bpf_printk("Passed");
+                    return XDP_PASS;
+                }
+                else{
+                    // else check size == limit
+                    if(*size_allowed == LIMIT_SYN){
+                        // if yes DROP
+                        bpf_printk("Dropped");
+                        return XDP_DROP;
+                    }
+                    else{
+                        //else update size and insert into hash and PASS
+                        *size_allowed += 1;
+                        bpf_map_update_elem(&tcp_syn_lru_hash_map,&packet_key,&curr_time,BPF_ANY);
+                        bpf_printk("Passed");
+                        return XDP_PASS;
+                    }
+                }
+            }
+            if (tcp->syn && tcp->ack) {
+                bpf_printk("TCP SYN-ACK packet detected!\n");
+                return XDP_PASS;
+            }
+            if (!tcp->syn && tcp->ack) {
+                //check if element is present
+                __u64 *packet_time = bpf_map_lookup_elem(&tcp_syn_lru_hash_map,&packet_key);
+                if(!packet_time){
+                    //  if yes check time is in range
+                    if(*packet_time < *old_time + EXTRA_TIME_SYN){
+                        //size =-1 remove from map and PASS
+                        *size_allowed -= 1;
+                        bpf_map_delete_elem(&tcp_syn_lru_hash_map,&packet_key);
+                        return XDP_PASS;
+                    }
+                    else{
+                        //PASS
+                        return XDP_PASS;
+                    }
+                }
+                else{
+                    // PASS
+                    return XDP_PASS;
+                }
+            }
+        }
+        else if(tcp->rst){
+            struct tcp_rst_port_node *node = bpf_map_lookup_elem(&tcp_rst_port,&dest);
+            if(!node){
+                return XDP_PASS;
+            }
+            __u64 curr_time = bpf_ktime_get_ns();
+            bpf_spin_lock(&node->semaphore);
+            if(node->port_time + TIMEOUT_RST < curr_time){
+                node->port_time = curr_time;
+                node->rst_cnt = 1;
+                bpf_spin_unlock(&node->semaphore);
+                bpf_printk("Passed");
+                return XDP_PASS;
+            }
+            else{
+                if(node->rst_cnt<THRESHOLD_RST){
+                    node->rst_cnt++;
+                    bpf_spin_unlock(&node->semaphore);
+                    bpf_printk("Passed");
+                    return XDP_PASS;
+                }
+                else{
+                    bpf_spin_unlock(&node->semaphore);
+                    bpf_printk("Dropped");
+                    return XDP_DROP;
+                }
+            }
+        }
+        return XDP_PASS;
+    }
+    if(application_layer_type == 2 && udp){
+        __u16 dest_port = 0;
+        dest_port = bpf_ntohs(udp->dest);
+        struct udp_port_stat *stat = bpf_map_lookup_elem(&udp_port_counters_map, &dest_port);
+        __u64 now = bpf_ktime_get_ns();
+
+        if (stat) {
+            if (now - (stat->last_check) < UDP_TIME_WINDOW) {
+                stat->packet_count += 1;
+
+                // If packet count exceeds threshold, drop packet
+                if (stat->packet_count > UDP_THRESHOLD_PACKETS) {
+                    bpf_printk("Dropping UDP packet to port %d due to flood\n", dest_port);
+                    return XDP_DROP;
+                } 
+            } else {
+                stat->packet_count = 1;
+                stat->last_check = now;
+            }
+            bpf_map_update_elem(&udp_port_counters_map, &dest_port, stat, BPF_ANY);
+        } else {
+            struct udp_port_stat new_stat = {};
+            new_stat.packet_count = 1;
+            new_stat.last_check = now;
+            bpf_map_update_elem(&udp_port_counters_map, &dest_port, &new_stat, BPF_ANY);
+        }
+    }
+    if(application_layer_type == 3 && icmp){
+        if (icmp->type == 8) { // 8 == icmp echo request packets
+            int packet_size = data_end - data;
+
+            if (packet_size > ICMP_MAX_PACKET_SIZE) {
+                return XDP_DROP;
+            }
+            __u32 key = 0;
+            struct icmp_rate_limit_data *rate_data = bpf_map_lookup_elem(&icmp_rate_limit_map, &key);
+            __u64 now = bpf_ktime_get_ns();
+
+            if (rate_data) {
+                __u64 elapsed = now - rate_data->last_reset_time;
+
+                if (elapsed >= ICMP_INTERVAL_NS) { // if too much time has passed since the first packet arrival time.
+                    rate_data->packet_count = 1;
+                    rate_data->last_reset_time = now;
+                } else {
+                    if (rate_data->packet_count >= UDP_MAX_PACKET_RATE) {
+                        return XDP_DROP;
+                    }
+                    rate_data->packet_count++;
+                }
+                bpf_map_update_elem(&icmp_rate_limit_map, &key, rate_data, BPF_ANY);
+            } else {
+                struct icmp_rate_limit_data new_data = {
+                    .last_reset_time = now,
+                    .packet_count = 1
+                };
+                bpf_map_update_elem(&icmp_rate_limit_map, &key, &new_data, BPF_ANY);
+            }
+        }
+    }
+    
     return XDP_PASS;
 }
 
