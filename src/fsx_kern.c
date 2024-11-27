@@ -544,6 +544,66 @@ int fsx(struct xdp_md *ctx)
         }
         return XDP_PASS;
     }
+    if(application_layer_type == 2 && udp){
+        __u16 dest_port = 0;
+        dest_port = bpf_ntohs(udp->dest);
+        struct udp_port_stat *stat = bpf_map_lookup_elem(&udp_port_counters_map, &dest_port);
+        __u64 now = bpf_ktime_get_ns();
+
+        if (stat) {
+            if (now - (stat->last_check) < UDP_TIME_WINDOW) {
+                stat->packet_count += 1;
+
+                // If packet count exceeds threshold, drop packet
+                if (stat->packet_count > UDP_THRESHOLD_PACKETS) {
+                    bpf_printk("Dropping UDP packet to port %d due to flood\n", dest_port);
+                    return XDP_DROP;
+                } 
+            } else {
+                stat->packet_count = 1;
+                stat->last_check = now;
+            }
+            bpf_map_update_elem(&udp_port_counters_map, &dest_port, stat, BPF_ANY);
+        } else {
+            struct udp_port_stat new_stat = {};
+            new_stat.packet_count = 1;
+            new_stat.last_check = now;
+            bpf_map_update_elem(&udp_port_counters_map, &dest_port, &new_stat, BPF_ANY);
+        }
+    }
+    if(application_layer_type == 3 && icmp){
+        if (icmp->type == 8) { // 8 == icmp echo request packets
+            int packet_size = data_end - data;
+
+            if (packet_size > ICMP_MAX_PACKET_SIZE) {
+                return XDP_DROP;
+            }
+            __u32 key = 0;
+            struct icmp_rate_limit_data *rate_data = bpf_map_lookup_elem(&icmp_rate_limit_map, &key);
+            __u64 now = bpf_ktime_get_ns();
+
+            if (rate_data) {
+                __u64 elapsed = now - rate_data->last_reset_time;
+
+                if (elapsed >= ICMP_INTERVAL_NS) { // if too much time has passed since the first packet arrival time.
+                    rate_data->packet_count = 1;
+                    rate_data->last_reset_time = now;
+                } else {
+                    if (rate_data->packet_count >= UDP_MAX_PACKET_RATE) {
+                        return XDP_DROP;
+                    }
+                    rate_data->packet_count++;
+                }
+                bpf_map_update_elem(&icmp_rate_limit_map, &key, rate_data, BPF_ANY);
+            } else {
+                struct icmp_rate_limit_data new_data = {
+                    .last_reset_time = now,
+                    .packet_count = 1
+                };
+                bpf_map_update_elem(&icmp_rate_limit_map, &key, &new_data, BPF_ANY);
+            }
+        }
+    }
     
     return XDP_PASS;
 }
