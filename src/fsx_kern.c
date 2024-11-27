@@ -13,6 +13,13 @@ in the fsx_struct.h map */
 #include "fsx_struct.h"
 #include "parsing_helper.h"
 
+
+#define SIZEOFPORTS_RST 65536       //number of ports
+#define TIMEOUT_RST  1000000000     //1 sec
+#define THRESHOLD_RST 100           //limit on number of packets to be configurable later
+#define LIMIT_SYN 100               //limit on number of packets to be configurable later
+#define EXTRA_TIME_SYN 1000000000   //1 sec
+
 #ifndef memcpy
 #define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
 #endif
@@ -92,6 +99,27 @@ struct
     __type(key, __u128);
     __type(value, __u64);
 } ipv6_blacklist_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 2);      
+    __type(key, __u32);            
+    __type(value, __u64);          
+} tcp_syn_size_oldtime SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1000);      
+    __type(key, struct tcp_syn_packet_id_key);            
+    __type(value, __u64);          
+} tcp_syn_lru_hash_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, SIZEOFPORTS_RST);      
+    __type(key, __u32);            
+    __type(value, struct tcp_rst_port_node);          
+} tcp_rst_port SEC(".maps");
 
 SEC("xdp")
 int fsx(struct xdp_md *ctx)
